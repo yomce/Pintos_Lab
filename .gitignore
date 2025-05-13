@@ -1,0 +1,30 @@
+# Pintos 빌드 중간 파일 및 산출물
+*.o
+*.d
+*.out
+*.bin
+*.elf
+*.img
+*.map
+*.lst
+*.log
+*.qemu
+*.raw
+*.hex
+*.dis
+*.dump
+
+# 빌드 디렉터리
+**/build/
+**/bin/
+**/obj/
+**/output/
+# core dump
+core
+
+# 임시 파일
+*~
+*.swp
+
+# macOS
+.DS_Store
