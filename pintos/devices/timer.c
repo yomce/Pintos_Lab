@@ -109,18 +109,17 @@ void timer_sleep(int64_t ticks) {
     if (ticks <= 0)
         return;
 
-    int64_t start = timer_ticks();
-	int64_t wake_tick = start + ticks;
+    int64_t wake_time = timer_ticks() + ticks;
 
     ASSERT(intr_get_level() == INTR_ON);
     // while (timer_elapsed (start) < ticks)
     // 	thread_yield ();
 
+    struct thread *curr = thread_current();
+    curr->timer = wake_time;
+
     enum intr_level old_level = intr_disable(); // 인터럽트 차단
 
-    struct thread *curr = thread_current();
-    curr->timer = wake_tick; // 깨어날 시점 저장
-	
     list_insert_ordered(&sleep_list, &curr->elem, wake_tick_less, NULL);
     thread_block();
 
