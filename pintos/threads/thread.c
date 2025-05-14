@@ -79,6 +79,9 @@ static tid_t allocate_tid (void);
 // setup temporal gdt first.
 static uint64_t gdt[3] = { 0, 0x00af9a000000ffff, 0x00cf92000000ffff };
 
+static bool
+priority_compare_func(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED);
+
 /* Initializes the threading system by transforming the code
    that's currently running into a thread.  This can't work in
    general and it is possible in this case only because loader.S
@@ -224,6 +227,14 @@ thread_block (void) {
 	schedule ();
 }
 
+/* 비교 함수: 우선순위 높은 스레드가 앞으로 오도록 */
+static bool
+priority_compare_func(const struct list_elem *a, const struct list_elem *b, void *aux UNUSED) {
+    struct thread *t_a = list_entry(a, struct thread, elem);
+    struct thread *t_b = list_entry(b, struct thread, elem);
+    return t_a->priority > t_b->priority;  // 높은 우선순위가 먼저
+}
+
 /* Transitions a blocked thread T to the ready-to-run state.
    This is an error if T is not blocked.  (Use thread_yield() to
    make the running thread ready.)
@@ -240,7 +251,7 @@ thread_unblock (struct thread *t) {
 
 	old_level = intr_disable ();
 	ASSERT (t->status == THREAD_BLOCKED);
-	list_push_back (&ready_list, &t->elem);
+	list_insert_ordered(&ready_list, &t->elem, priority_compare_func, NULL);
 	t->status = THREAD_READY;
 	intr_set_level (old_level);
 }
@@ -303,7 +314,7 @@ thread_yield (void) {
 
 	old_level = intr_disable ();
 	if (curr != idle_thread)
-		list_push_back (&ready_list, &curr->elem);
+		list_insert_ordered(&ready_list, &curr->elem, priority_compare_func, NULL);
 	do_schedule (THREAD_READY);
 	intr_set_level (old_level);
 }
@@ -312,6 +323,13 @@ thread_yield (void) {
 void
 thread_set_priority (int new_priority) {
 	thread_current ()->priority = new_priority;
+
+	// 현재보다 높은 우선순위 스레드가 준비 리스트에 있다면 양보
+	if (!list_empty(&ready_list)) {
+	  struct thread *highest = list_entry(list_front(&ready_list), struct thread, elem);
+	  if (highest->priority > thread_current()->priority)
+	    thread_yield();
+	}
 }
 
 /* Returns the current thread's priority. */
@@ -368,7 +386,7 @@ idle (void *idle_started_ UNUSED) {
 		intr_disable ();
 		thread_block ();
 
-		/* Re-enable interrupts and wait for the next one.
+		/* Re-enable interrupts and wait for the ne xt one.
 
 		   The `sti' instruction disables interrupts until the
 		   completion of the next instruction, so these two
