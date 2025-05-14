@@ -205,7 +205,12 @@ thread_create (const char *name, int priority,
 	t->tf.eflags = FLAG_IF;
 
 	/* 실행 큐에 추가 */
-	thread_unblock (t);
+	thread_unblock(t);
+
+	// 새로 생성한 스레드의 우선순위가 현재보다 높으면 양보
+	if (t->priority > thread_current()->priority) {
+		thread_yield();
+	}
 
 	return tid;
 }
