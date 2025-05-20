@@ -172,7 +172,7 @@ void thread_sleep(int64_t ticks) {
   cur->wake_up_tick = ticks;
   if (cur != idle_thread) {
       list_insert_ordered(&sleep_list, &cur->ready_elem,
-                          thread_compare_priority, NULL);
+                          thread_compare_wake_up, NULL);
   }
   do_schedule(THREAD_BLOCKED);
   intr_set_level(old_level); //인터럽트 부활
@@ -474,6 +474,9 @@ static void init_thread(struct thread *t, const char *name, int priority) {
   strlcpy(t->name, name, sizeof t->name);
   t->tf.rsp = (uint64_t)t + PGSIZE - sizeof(void *);
   t->priority = priority;
+  t->init_priority = priority;
+  t->wait_on_lock = NULL;
+  list_init(&t->donations);
   t->magic = THREAD_MAGIC;
 }
 
@@ -591,8 +594,8 @@ static void do_schedule(int status) {
   ASSERT(intr_get_level() == INTR_OFF);
   ASSERT(thread_current()->status == THREAD_RUNNING);
   while (!list_empty(&destruction_req)) {
-    struct thread *victim =
-        list_entry(list_pop_front(&destruction_req), struct thread, ready_elem);
+    struct thread *victim = list_entry(list_pop_front(&destruction_req), 
+                                       struct thread, ready_elem);
     palloc_free_page(victim);
   }
   thread_current()->status = status;
@@ -628,9 +631,7 @@ static void schedule(void) {
        시작)에서 실행됨. */
     if (curr && curr->status == THREAD_DYING && curr != initial_thread) {
       ASSERT(curr != next);
-      // list_push_back (&destruction_req, &curr->elem);
-      list_insert_ordered(&destruction_req, &curr->ready_elem,
-                          thread_compare_priority, NULL);
+      list_push_back (&destruction_req, &curr->ready_elem);
     }
 
     /* 스레드를 전환하기 전에,
