@@ -106,6 +106,11 @@ struct thread {
   struct list_elem donation_elem; // 위의 스레드 리스트를 관리하기위한
                                   // element. thread 구조체의 elem과 구분.
 
+  int exit_status;   /* 이 스레드가 exit() 로 전달한 종료 상태 */
+
+  struct file   *fd_table[128];    /* fd → struct file* 매핑 */
+  int             next_fd;         /* 다음에 할당할 fd 번호 (0,1은 stdin/stdout) */
+
 #ifdef USERPROG
   /* Owned by userprog/process.c. */
   uint64_t *pml4; /* Page map level 4 */
