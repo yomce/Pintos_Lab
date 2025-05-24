@@ -18,31 +18,41 @@
 #include "threads/mmu.h"
 #include "threads/vaddr.h"
 #include "intrinsic.h"
+#include "lib/string.h"  /* for strtok_r() */
 #ifdef VM
 #include "vm/vm.h"
 #endif
+
+#define MAX_ARGS 128
 
 static void process_cleanup (void);
 static bool load (const char *file_name, struct intr_frame *if_);
 static void initd (void *f_name);
 static void __do_fork (void *);
+static void push_args_to_stack(char **argv, int argc,
+							   struct intr_frame *if_);
+static bool setup_stack(struct intr_frame *if_,
+                        char **argv, int argc);
 
-/* General process initializer for initd and other process. */
+/* initd 및 기타 프로세스를 위한 일반 프로세스 초기화프로그램.*/
 static void
 process_init (void) {
-	struct thread *current = thread_current ();
+	struct thread* current = thread_current ();
+	/* file descriptor 초기화 */
+    memset(current->fd_table, 0, sizeof current->fd_table);
+	current->next_fd  = 2;   /* 0=stdin, 1=stdout 예약 */
 }
 
-/* Starts the first userland program, called "initd", loaded from FILE_NAME.
- * The new thread may be scheduled (and may even exit)
- * before process_create_initd() returns. Returns the initd's
- * thread id, or TID_ERROR if the thread cannot be created.
- * Notice that THIS SHOULD BE CALLED ONCE. */
+/* FILE_NAME에서 로드된 "initd"라는 첫 번째 유저랜드 프로그램을 시작합니다.
+ * 새 스레드는 process_create_initd()가 반환되기 전에 스케줄되거나 (종료될 수도) 합니다.
+ * initd의 스레드 ID를 반환하며, 스레드를 생성할 수 없으면 TID_ERROR를 반환합니다.
+ * 이 함수는 단 한 번만 호출되어야 합니다.*/
 tid_t
 process_create_initd (const char *file_name) {
-	char *fn_copy;
-	tid_t tid;
-
+	char *fn_copy, *name_copy;
+    tid_t tid;
+    char *name, *save_ptr;
+	
 	/* Make a copy of FILE_NAME.
 	 * Otherwise there's a race between the caller and load(). */
 	fn_copy = palloc_get_page (0);
@@ -50,23 +60,35 @@ process_create_initd (const char *file_name) {
 		return TID_ERROR;
 	strlcpy (fn_copy, file_name, PGSIZE);
 
+	/* 실행 파일 이름만 뽑을 때 쓸 또 다른 복사본 */
+    name_copy = palloc_get_page(0);
+    if (name_copy == NULL) {
+        palloc_free_page(fn_copy);
+        return TID_ERROR;
+    }
+
 	/* Create a new thread to execute FILE_NAME. */
-	tid = thread_create (file_name, PRI_DEFAULT, initd, fn_copy);
-	if (tid == TID_ERROR)
-		palloc_free_page (fn_copy);
-	return tid;
+	strlcpy(name_copy, file_name, PGSIZE);
+    name = strtok_r(name_copy, " ", &save_ptr);
+    /* name_copy 은 더 이상 필요 없으니 해제 */
+    palloc_free_page(name_copy);
+
+	tid = thread_create(name, PRI_DEFAULT, initd, fn_copy);
+    if (tid == TID_ERROR)
+        palloc_free_page(fn_copy);
+    return tid;
 }
 
 /* A thread function that launches first user process. */
 static void
 initd (void *f_name) {
+	char *fn_copy = f_name;
+    process_init();
 #ifdef VM
 	supplemental_page_table_init (&thread_current ()->spt);
 #endif
 
-	process_init ();
-
-	if (process_exec (f_name) < 0)
+	if (process_exec (fn_copy) < 0)
 		PANIC("Fail to launch initd\n");
 	NOT_REACHED ();
 }
@@ -158,37 +180,38 @@ error:
 	thread_exit ();
 }
 
-/* Switch the current execution context to the f_name.
- * Returns -1 on fail. */
-int
-process_exec (void *f_name) {
+/* 현재 실행 중인 실행 컨텍스트를 f_name으로 전환합니다.
+ * 실패 시 -1을 반환합니다. */
+int process_exec (void *f_name) {
 	char *file_name = f_name;
 	bool success;
 
-	/* We cannot use the intr_frame in the thread structure.
-	 * This is because when current thread rescheduled,
-	 * it stores the execution information to the member. */
+	/* 스레드 구조체의 intr_frame을 사용할 수 없습니다.
+     * 이는 현재 스레드가 재스케줄될 때
+     * 실행 정보를 해당 멤버에 저장하기 때문입니다. */
 	struct intr_frame _if;
 	_if.ds = _if.es = _if.ss = SEL_UDSEG;
 	_if.cs = SEL_UCSEG;
 	_if.eflags = FLAG_IF | FLAG_MBS;
 
-	/* We first kill the current context */
+	/* 기존 실행 컨텍스트 정리 */
 	process_cleanup ();
 
-	/* And then load the binary */
+	/* 그리고 바이너리를 로드합니다. */
+	/* 여기서 load() 호출 시, argv_store/argc_store를
+       setup_stack() 안에서 참조하도록 구현해야 합니다. */
 	success = load (file_name, &_if);
+	// hex_dump((void*)_if.rsp, (void*)_if.rsp, USER_STACK - (uint64_t)_if.rsp, true);
 
-	/* If load failed, quit. */
+	/* 로드에 실패하면 종료합니다. */
 	palloc_free_page (file_name);
 	if (!success)
 		return -1;
 
-	/* Start switched process. */
+	/* 전환된 프로세스를 시작합니다. */
 	do_iret (&_if);
 	NOT_REACHED ();
 }
-
 
 /* Waits for thread TID to die and returns its exit status.  If
  * it was terminated by the kernel (i.e. killed due to an
@@ -204,6 +227,9 @@ process_wait (tid_t child_tid UNUSED) {
 	/* XXX: Hint) The pintos exit if process_wait (initd), we recommend you
 	 * XXX:       to add infinite loop here before
 	 * XXX:       implementing the process_wait. */
+	for (int i = 0; i < 200000000; i++){
+
+	}
 	return -1;
 }
 
@@ -283,26 +309,26 @@ struct ELF64_hdr {
 	uint16_t e_type;
 	uint16_t e_machine;
 	uint32_t e_version;
-	uint64_t e_entry;
-	uint64_t e_phoff;
+	uint64_t e_entry; // *중요 필드* 실행 시작 주소(->rip에 넣을 값)
+	uint64_t e_phoff; // *중요 필드* 프로그램 헤더 테이블의 시작 오프셋
 	uint64_t e_shoff;
 	uint32_t e_flags;
 	uint16_t e_ehsize;
 	uint16_t e_phentsize;
-	uint16_t e_phnum;
+	uint16_t e_phnum; // *중요 필드* 프로그램 헤더의 개수
 	uint16_t e_shentsize;
 	uint16_t e_shnum;
 	uint16_t e_shstrndx;
 };
 
 struct ELF64_PHDR {
-	uint32_t p_type;
-	uint32_t p_flags;
-	uint64_t p_offset;
-	uint64_t p_vaddr;
+	uint32_t p_type; // 세그먼트 종류(PT_LOAD는 메모리에 로드할 세그먼트)
+	uint32_t p_flags; // 읽기/쓰기/실행 권한
+	uint64_t p_offset; // 파일에서 이 세그먼트가 시작되는 위치
+	uint64_t p_vaddr; // 메모리에 적재될 가상 주소
 	uint64_t p_paddr;
-	uint64_t p_filesz;
-	uint64_t p_memsz;
+	uint64_t p_filesz; // 파일에서 읽어야 할 바이트 수
+	uint64_t p_memsz; // 메모리에 필요한 전체 크기(파일보다 클 수 있음 -> 나머지는 0으로 채움)
 	uint64_t p_align;
 };
 
@@ -310,119 +336,146 @@ struct ELF64_PHDR {
 #define ELF ELF64_hdr
 #define Phdr ELF64_PHDR
 
-static bool setup_stack (struct intr_frame *if_);
+static bool setup_stack (struct intr_frame *if_, char **argv, int argc);
 static bool validate_segment (const struct Phdr *, struct file *);
 static bool load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		uint32_t read_bytes, uint32_t zero_bytes,
 		bool writable);
 
-/* Loads an ELF executable from FILE_NAME into the current thread.
- * Stores the executable's entry point into *RIP
- * and its initial stack pointer into *RSP.
- * Returns true if successful, false otherwise. */
-static bool
-load (const char *file_name, struct intr_frame *if_) {
-	struct thread *t = thread_current ();
-	struct ELF ehdr;
-	struct file *file = NULL;
-	off_t file_ofs;
-	bool success = false;
+static void push_args_to_stack(char **argv, int argc,
+                               struct intr_frame *if_);
+
+/* FILE_NAME에서 ELF 실행 파일을 현재 스레드에 로드합니다.
+ * 실행 파일의 진입점을 *RIP에 저장하고,
+ * 초기 스택 포인터를 *RSP에 저장합니다.
+ * 성공하면 true를, 실패하면 false를 반환합니다. */
+static bool 
+load(const char* file_name, struct intr_frame* if_) {
+	struct thread* t = thread_current(); //현재 스레드 가져오기
+	struct ELF ehdr;					 //ELF 헤더를 저장할 구조체
+	struct file* file = NULL;			 //실행 파일 핸들
+	off_t file_ofs;						 //프로그램 헤더의 파일 오프셋
+	bool success = false;				 //로드 성공 여부 플래그
 	int i;
 
-	/* Allocate and activate page directory. */
-	t->pml4 = pml4_create ();
-	if (t->pml4 == NULL)
-		goto done;
-	process_activate (thread_current ());
+	/* arg 파싱 */
+	int argc = 0;
+	char* argv[128]; // 인자 최대 크기로 제한(인자 스트링 저장)
 
-	/* Open executable file. */
-	file = filesys_open (file_name);
+	char* token, * save_ptr;
+	for (token = strtok_r((char *) file_name, " ", &save_ptr); token != NULL;
+		token = strtok_r(NULL, " ", &save_ptr)) {
+		argv[argc++] = token;
+	}
+	file_name = argv[0]; // file name 변경
+
+	/* 1. 새 페이지 디렉터리(PML4) 생성 및 활성화 */
+	t->pml4 = pml4_create();   			 // 새 PML4 (페이지 테이블) 생성
+	if (t->pml4 == NULL)				 
+		goto done;						 // 생성 실패시 종료
+	process_activate(thread_current());  // 생성된 PML4를 활성화 (CR3 레지스터 설정) 
+										 //	context switching 유발
+
+	/* 2. 실행 파일 열기 */
+	file = filesys_open(file_name);  	 // 파일 시스템에서 ELF 열기
 	if (file == NULL) {
-		printf ("load: %s: open failed\n", file_name);
+		printf("load: %s: open failed\n", file_name);
 		goto done;
 	}
 
-	/* Read and verify executable header. */
-	if (file_read (file, &ehdr, sizeof ehdr) != sizeof ehdr
-			|| memcmp (ehdr.e_ident, "\177ELF\2\1\1", 7)
-			|| ehdr.e_type != 2
-			|| ehdr.e_machine != 0x3E // amd64
-			|| ehdr.e_version != 1
-			|| ehdr.e_phentsize != sizeof (struct Phdr)
-			|| ehdr.e_phnum > 1024) {
-		printf ("load: %s: error loading executable\n", file_name);
-		goto done;
-	}
+	/* 3. ELF 헤더 읽기 및 기본 검증 */
+    if (file_read(file, &ehdr, sizeof ehdr) != sizeof ehdr     // 헤더 크기만큼 읽기
+        || memcmp(ehdr.e_ident, "\177ELF\2\1\1", 7)       // 매직 넘버 확인
+        || ehdr.e_type != 2                                    // 실행 파일 타입 확인
+        || ehdr.e_machine != 0x3E                              // AMD64 아키텍처 확인
+        || ehdr.e_version != 1                                 // ELF 버전 확인
+        || ehdr.e_phentsize != sizeof(struct Phdr)            // 프로그램 헤더 엔트리 크기 확인
+        || ehdr.e_phnum > 1024) {                              // 프로그램 헤더 개수 상한
+        printf("load: %s: error loading executable\n", file_name);
+        goto done;
+    }
 
-	/* Read program headers. */
-	file_ofs = ehdr.e_phoff;
-	for (i = 0; i < ehdr.e_phnum; i++) {
-		struct Phdr phdr;
-
-		if (file_ofs < 0 || file_ofs > file_length (file))
+	/*
+        ELF 파일 안의 로딩 가능한 세그먼트(PT_LOAD)들을 찾아,
+        적절한 위치에 메모리 할당 + 내용 복사 + 초기화
+        ehdr.e_phoff: 프로그램 헤더들이 파일 안에서 시작하는 위치
+        ehdr.e_phnum: 프로그램 헤더 개수
+        for 문이 모든 프로그램 헤더를 순회 */
+	/* 4. 프로그램 헤더 순회: 각 PT_LOAD 세그먼트를 로드 */
+    file_ofs = ehdr.e_phoff;                       // 프로그램 헤더 시작 오프셋
+    for (i = 0; i < ehdr.e_phnum; i++) {
+        struct Phdr phdr;
+		// 헤더 읽을 위치로 이동 및 읽기. 파일 범위를 벗어나면 goto done
+		if (file_ofs < 0 || file_ofs > file_length(file))
 			goto done;
-		file_seek (file, file_ofs);
+		file_seek(file, file_ofs); // 해당 프로그램 헤더 위치로 이동
 
-		if (file_read (file, &phdr, sizeof phdr) != sizeof phdr)
+		if (file_read(file, &phdr, sizeof phdr) != sizeof phdr)
 			goto done;
 		file_ofs += sizeof phdr;
 		switch (phdr.p_type) {
-			case PT_NULL:
-			case PT_NOTE:
-			case PT_PHDR:
-			case PT_STACK:
-			default:
-				/* Ignore this segment. */
-				break;
-			case PT_DYNAMIC:
-			case PT_INTERP:
-			case PT_SHLIB:
-				goto done;
-			case PT_LOAD:
-				if (validate_segment (&phdr, file)) {
-					bool writable = (phdr.p_flags & PF_W) != 0;
-					uint64_t file_page = phdr.p_offset & ~PGMASK;
-					uint64_t mem_page = phdr.p_vaddr & ~PGMASK;
-					uint64_t page_offset = phdr.p_vaddr & PGMASK;
-					uint32_t read_bytes, zero_bytes;
-					if (phdr.p_filesz > 0) {
-						/* Normal segment.
-						 * Read initial part from disk and zero the rest. */
-						read_bytes = page_offset + phdr.p_filesz;
-						zero_bytes = (ROUND_UP (page_offset + phdr.p_memsz, PGSIZE)
-								- read_bytes);
-					} else {
-						/* Entirely zero.
-						 * Don't read anything from disk. */
-						read_bytes = 0;
-						zero_bytes = ROUND_UP (page_offset + phdr.p_memsz, PGSIZE);
-					}
-					if (!load_segment (file, file_page, (void *) mem_page,
-								read_bytes, zero_bytes, writable))
-						goto done;
+		case PT_NULL:
+		case PT_NOTE:
+		case PT_PHDR:
+		case PT_STACK:
+		default:
+			/* 이 세그먼트를 무시합니다. */
+			break;
+		case PT_DYNAMIC:
+		case PT_INTERP:
+		case PT_SHLIB:
+			goto done;
+		case PT_LOAD:
+			if (validate_segment(&phdr, file)) {
+				bool writable = (phdr.p_flags & PF_W) != 0;
+				uint64_t file_page = phdr.p_offset & ~PGMASK;
+				uint64_t mem_page = phdr.p_vaddr & ~PGMASK;
+				uint64_t page_offset = phdr.p_vaddr & PGMASK;
+				uint32_t read_bytes, zero_bytes;
+				if (phdr.p_filesz > 0) {
+					/* 일반 세그먼트.
+					   디스크에서 읽을 바이트 수 계산
+ 					   디스크에서 초기 부분을 읽고 나머지는 0으로 채웁니다.*/
+					read_bytes = page_offset + phdr.p_filesz;
+					zero_bytes = (ROUND_UP(page_offset + phdr.p_memsz, PGSIZE)
+						- read_bytes);
 				}
-				else
+				else {
+					/* 전체 페이지 0으로 초기화합니다.
+ 					 * 디스크에서 어떤 것도 읽지 않습니다. */
+					read_bytes = 0;
+					zero_bytes = ROUND_UP(page_offset + phdr.p_memsz, PGSIZE);
+				}
+				/* 실제 메모리 매핑 수행 */
+				if (!load_segment(file, file_page, (void*)mem_page,
+					read_bytes, zero_bytes, writable))
 					goto done;
-				break;
+			}
+			else
+				goto done;
+			break;
 		}
 	}
 
-	/* Set up stack. */
-	if (!setup_stack (if_))
+	/* 스택 설정. */
+	if (!setup_stack(if_, argv, argc)) // 스택 페이지 할당 및 RSP 설정 rsp (스택 시작 지점)
 		goto done;
 
-	/* Start address. */
-	if_->rip = ehdr.e_entry;
+	/* 시작 주소. */
+	/* 6. 진입점(entry point) 설정 */
+	if_->rip = ehdr.e_entry; // ELF 헤더의 e_entry를 RIP에 저장
 
-	/* TODO: Your code goes here.
-	 * TODO: Implement argument passing (see project2/argument_passing.html). */
+	strlcpy(thread_current()->name, file_name, sizeof thread_current()->name);
+
+	/* TODO: 인수 전달 구현 (argv, argc 스택에 푸시) 여기에 코드를 작성하세요.
+ 	 * TODO: 인수 전달을 구현합니다 (project2/argument_passing.html 참조). */
 
 	success = true;
 
 done:
-	/* We arrive here whether the load is successful or not. */
-	file_close (file);
-	return success;
+	/* 로드 성공 여부와 상관없이 이 지점에 도달합니다. */
+	file_close(file);                            // 열린 파일 닫기
+    return success;                              // 로드 결과 반환
 }
 
 
@@ -536,20 +589,112 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 
 /* Create a minimal stack by mapping a zeroed page at the USER_STACK */
 static bool
-setup_stack (struct intr_frame *if_) {
-	uint8_t *kpage;
-	bool success = false;
+setup_stack(struct intr_frame *if_, char **argv, int argc) {
+    uint8_t *kpage;
+    bool success = false;
 
-	kpage = palloc_get_page (PAL_USER | PAL_ZERO);
-	if (kpage != NULL) {
-		success = install_page (((uint8_t *) USER_STACK) - PGSIZE, kpage, true);
-		if (success)
-			if_->rsp = USER_STACK;
-		else
-			palloc_free_page (kpage);
-	}
-	return success;
+    /* 1) 스택용 페이지 할당 */
+    kpage = palloc_get_page(PAL_USER | PAL_ZERO);
+    if (kpage != NULL) {
+        /* 2) 유저 스택 가상주소에 매핑 시도 */
+        success = install_page((void *)(USER_STACK - PGSIZE), kpage, true);
+        if (success) {
+            /* 3) 성공했을 때만 rsp 세팅 & 인수 푸시 */
+            if_->rsp = USER_STACK;
+            push_args_to_stack(argv, argc, if_);
+        } else {
+            /* 4) 매핑 실패 시 방금 할당한 페이지 해제 */
+            palloc_free_page(kpage);
+        }
+    }
+    return success;
 }
+
+static void
+push_args_to_stack (char **argv, int argc, struct intr_frame *if_) {
+    /* 1) rsp 변수에 현재 스택 포인터 저장 */
+    void *rsp = (void *) if_->rsp;
+    void *arg_addrs[MAX_ARGS];
+
+    /* 2) 각 인자를 문자열(널 포함) 형태로 스택에 복사 (뒤에서부터) */
+    for (int i = argc - 1; i >= 0; i--) {
+        size_t len = strlen(argv[i]) + 1; // null 포함한 길이
+        rsp -= len;
+        memcpy(rsp, argv[i], len);
+        arg_addrs[i] = rsp; // 이후 argv 배열 생성 시 주소 사용
+    }
+
+    /* 3) word align: 8바이트 정렬이 될 때까지 바이트 단위로 0 써 넣기 */
+    while ((uintptr_t) rsp % 8 != 0) {
+	        rsp--;
+	        *(uint8_t *)rsp = 0;
+	    }
+
+    /* 4) argv[argc] = NULL (sentinel) */
+    rsp -= sizeof(char *); // argv[argc] = NULL
+    *(char **)rsp = NULL;
+
+    /* 5) argv[argc-1] … argv[0] 포인터 푸시 */
+    for (int i = argc - 1; i >= 0; i--) {
+        rsp -= sizeof(char *);
+        memcpy(rsp, &arg_addrs[i], sizeof(char *));
+    }
+
+    /* 6) fake return address (0) 푸시 */
+    rsp -= sizeof(void *);
+    *(void **)rsp = 0;
+
+    /* 7) 레지스터에 rdi = argc, rsi = argv 주소 설정 */
+    if_->R.rdi = argc;                              /* 첫 번째 인자: argc */
+    if_->R.rsi = (uint64_t)(rsp + sizeof(void *));  /* 두 번째 인자: &argv[0] */
+
+    /* 8) 최종 rsp 갱신 */
+    if_->rsp = (uint64_t) rsp;
+	
+}
+
+/* 새로운 file*을 프로세스 테이블에 등록하고 fd 반환.
+   실패 시 -1 */
+   int
+   process_add_file (struct file *f) {
+	 struct thread *t = thread_current ();
+	 for (int fd = t->next_fd; fd < 128; fd++) {
+	   if (t->fd_table[fd] == NULL) {
+		 t->fd_table[fd] = f;
+		 t->next_fd = fd + 1;
+		 return fd;
+	   }
+	 }
+	 /* wrap-around */
+	 for (int fd = 2; fd < t->next_fd; fd++) {
+	   if (t->fd_table[fd] == NULL) {
+		 t->fd_table[fd] = f;
+		 t->next_fd = fd + 1;
+		 return fd;
+	   }
+	 }
+	 return -1;
+   }
+   
+   /* fd → struct file* 조회, 없으면 NULL */
+   struct file *
+   process_get_file (int fd) {
+	 if (fd < 0 || fd >= 128)
+	   return NULL;
+	 return thread_current ()->fd_table[fd];
+   }
+   
+   /* fd 닫고 테이블에서 제거, 성공 시 true */
+   bool
+   process_close_file (int fd) {
+	 struct file *f = process_get_file(fd);
+	 if (!f) return false;
+	 file_close(f);
+	 thread_current()->fd_table[fd] = NULL;
+	 if (fd < thread_current()->next_fd)
+	   thread_current()->next_fd = fd;
+	 return true;
+   }
 
 /* Adds a mapping from user virtual address UPAGE to kernel
  * virtual address KPAGE to the page table.
@@ -623,17 +768,17 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 	return true;
 }
 
-/* Create a PAGE of stack at the USER_STACK. Return true on success. */
-static bool
-setup_stack (struct intr_frame *if_) {
-	bool success = false;
-	void *stack_bottom = (void *) (((uint8_t *) USER_STACK) - PGSIZE);
+// /* Create a PAGE of stack at the USER_STACK. Return true on success. */
+// static bool
+// setup_stack(struct intr_frame *if_, char **argv, int argc) {
+// 	bool success = false;
+// 	void *stack_bottom = (void *) (((uint8_t *) USER_STACK) - PGSIZE);
 
-	/* TODO: Map the stack on stack_bottom and claim the page immediately.
-	 * TODO: If success, set the rsp accordingly.
-	 * TODO: You should mark the page is stack. */
-	/* TODO: Your code goes here */
+// 	/* TODO: Map the stack on stack_bottom and claim the page immediately.
+// 	 * TODO: If success, set the rsp accordingly.
+// 	 * TODO: You should mark the page is stack. */
+// 	/* TODO: Your code goes here */
 
-	return success;
-}
+// 	return success;
+// }
 #endif /* VM */
