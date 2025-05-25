@@ -182,39 +182,38 @@ strstr (const char *haystack, const char *needle) {
 	return NULL;
 }
 
-/* Breaks a string into tokens separated by DELIMITERS.  The
-   first time this function is called, S should be the string to
-   tokenize, and in subsequent calls it must be a null pointer.
-   SAVE_PTR is the address of a `char *' variable used to keep
-   track of the tokenizer's position.  The return value each time
-   is the next token in the string, or a null pointer if no
-   tokens remain.
+/*
+ * DELIMITERS로 구분된 토큰으로 문자열을 분할합니다.
+ * 이 함수가 처음 호출될 때는 S가 토큰화할 문자열이어야 하며,
+ * 이후 호출에서는 NULL이어야 합니다.
+ * SAVE_PTR는 토크나이저의 위치를 추적하는 `char *` 변수의 주소입니다.
+ * 매 호출 시 반환 값은 문자열의 다음 토큰이거나,
+ * 더 이상 토큰이 없으면 NULL을 반환합니다.
+ *
+ * 이 함수는 연속된 여러 구분 문자를 하나의 구분자로 처리합니다.
+ * 반환된 토큰은 절대 길이가 0이 되지 않습니다.
+ * DELIMITERS는 한 문자열 내에서 호출마다 변경될 수 있습니다.
+ *
+ * strtok_r()는 문자열 S를 수정하여 구분 문자를 널 바이트(‘\0’)로 바꿉니다.
+ * 따라서 S는 수정 가능한 문자열이어야 합니다.
+ * 특히 문자열 리터럴은 C에서 `const`가 아니더라도 수정이 불가능합니다.
+ *
+ * 사용 예:
+ *
+ *   char s[] = "  String to  tokenize. ";
+ *   char *token, *save_ptr;
+ *
+ *   for (token = strtok_r (s, " ", &save_ptr); token != NULL;
+ *        token = strtok_r (NULL, " ", &save_ptr))
+ *     printf ("'%s'\n", token);
+ *
+ * 출력:
+ *
+ * 'String'
+ * 'to'
+ * 'tokenize.'
+ */
 
-   This function treats multiple adjacent delimiters as a single
-   delimiter.  The returned tokens will never be length 0.
-   DELIMITERS may change from one call to the next within a
-   single string.
-
-   strtok_r() modifies the string S, changing delimiters to null
-   bytes.  Thus, S must be a modifiable string.  String literals,
-   in particular, are *not* modifiable in C, even though for
-   backward compatibility they are not `const'.
-
-   Example usage:
-
-   char s[] = "  String to  tokenize. ";
-   char *token, *save_ptr;
-
-   for (token = strtok_r (s, " ", &save_ptr); token != NULL;
-   token = strtok_r (NULL, " ", &save_ptr))
-   printf ("'%s'\n", token);
-
-outputs:
-
-'String'
-'to'
-'tokenize.'
-*/
 char *
 strtok_r (char *s, const char *delimiters, char **save_ptr) {
 	char *token;
